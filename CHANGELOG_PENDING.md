@@ -7,6 +7,9 @@
 - [schema] Add IsOverlay option to disable codegen for particular types
   [#8338](https://github.com/pulumi/pulumi/pull/8338)
 
+- [sdk/nodejs] - Unmarshal output values in component provider.
+  [#8205](https://github.com/pulumi/pulumi/pull/8205)
+
 ### Bug Fixes
 
 - [engine] - Compute dependents correctly during targeted deletes.
