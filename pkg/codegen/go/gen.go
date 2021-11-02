@@ -1004,35 +1004,10 @@ func (pkg *pkgContext) genPtrOutputMethods(w io.Writer, schemaType *schema.Optio
 	fmt.Fprintf(w, "\t}).(%sOutput)\n", baseName)
 	fmt.Fprint(w, "}\n\n")
 
-	if object, ok := schemaType.ElementType.(*schema.ObjectType); ok {
-		for _, p := range object.Properties {
-			printCommentWithDeprecationMessage(w, p.Comment, p.DeprecationMessage, false)
-			optionalType := codegen.OptionalType(p)
-			outputType, applyType := pkg.outputType(optionalType), pkg.typeString(optionalType)
-			deref := ""
-			// If the property was required, but the type it needs to return is an explicit pointer type, then we need
-			// to dereference it, unless it is a resource type which should remain a pointerArrayMap.
-			_, isResourceType := p.Type.(*schema.ResourceType)
-			if p.IsRequired() && applyType[0] == '*' && !isResourceType {
-				deref = "&"
-			}
-
-			funcName := Title(p.Name)
-			// Avoid conflicts with Output interface for lifted attributes.
-			switch funcName {
-			case "IsSecret", "ElementType":
-				funcName = funcName + "Prop"
-			}
-
-			fmt.Fprintf(w, "func (o %sOutput) %s() %s {\n", baseName, funcName, outputType)
-			fmt.Fprintf(w, "\treturn o.ApplyT(func (v *%s) %s {\n", baseName, applyType)
-			fmt.Fprintf(w, "\t\tif v == nil {\n")
-			fmt.Fprintf(w, "\t\t\treturn nil\n")
-			fmt.Fprintf(w, "\t\t}\n")
-			fmt.Fprintf(w, "\t\treturn %sv.%s\n", deref, Title(p.Name))
-			fmt.Fprintf(w, "\t}).(%s)\n", outputType)
-			fmt.Fprintf(w, "}\n\n")
-		}
+	switch t := schemaType.ElementType.(type) {
+	case *schema.ObjectType:
+		pkg.genObjectPtrOutputMethods(w, t, baseName)
+	case *schema.EnumType:
 	}
 }
 
@@ -1140,6 +1115,48 @@ func (pkg *pkgContext) genEnumInputFuncs(w io.Writer, typeName string, enum *sch
 	}
 }
 
+func (pkg *pkgContext) genEnumOutputFuncs(w io.Writer, name, elementType, goElementType, asFuncName string, ptrMethods bool) {
+	fmt.Fprintf(w, "func (o %[1]sOutput) To%[2]sOutput() %[3]sOutput {\n", name, asFuncName, elementType)
+	fmt.Fprintf(w, "return o.To%sOutputWithContext(context.Background())\n", asFuncName)
+	fmt.Fprint(w, "}\n\n")
+
+	fmt.Fprintf(w, "func (o %[1]sOutput) To%[2]sOutputWithContext(ctx context.Context) %[3]sOutput {\n", name, asFuncName, elementType)
+	fmt.Fprintf(w, "return o.ApplyTWithContext(ctx, func(_ context.Context, e %s) %s {\n", name, goElementType)
+	fmt.Fprintf(w, "return %s(e)\n", goElementType)
+	fmt.Fprintf(w, "}).(%sOutput)\n", elementType)
+	fmt.Fprint(w, "}\n\n")
+
+	if ptrMethods {
+		fmt.Fprintf(w, "func (o %[1]sOutput) To%[2]sPtrOutput() %[3]sPtrOutput {\n", name, asFuncName, elementType)
+		fmt.Fprintf(w, "return o.To%sPtrOutputWithContext(context.Background())\n", asFuncName)
+		fmt.Fprint(w, "}\n\n")
+
+		fmt.Fprintf(w, "func (o %[1]sOutput) To%[2]sPtrOutputWithContext(ctx context.Context) %[3]sPtrOutput {\n", name, asFuncName, elementType)
+		fmt.Fprintf(w, "return o.ApplyTWithContext(ctx, func(_ context.Context, e %s) *%s {\n", name, goElementType)
+		fmt.Fprintf(w, "v := %s(e)\n", goElementType)
+		fmt.Fprintf(w, "return &v\n")
+		fmt.Fprintf(w, "}).(%sPtrOutput)\n", elementType)
+		fmt.Fprint(w, "}\n\n")
+	}
+}
+
+func (pkg *pkgContext) genEnumPtrOutputFuncs(w io.Writer, name, elementType, goElementType, asFuncName string) {
+	fmt.Fprintf(w, "func (o %[1]sPtrOutput) To%[2]sPtrOutput() %[3]sPtrOutput {\n", name, asFuncName, elementType)
+	fmt.Fprintf(w, "return o.To%sPtrOutputWithContext(context.Background())\n", asFuncName)
+	fmt.Fprint(w, "}\n\n")
+
+	fmt.Fprintf(w, "func (o %[1]sPtrOutput) To%[2]sPtrOutputWithContext(ctx context.Context) %[3]sPtrOutput {\n", name, asFuncName, elementType)
+	fmt.Fprintf(w, "return o.ApplyTWithContext(ctx, func(_ context.Context, e *%s) *%s {\n", name, goElementType)
+	fmt.Fprintf(w, "if e == nil {\n")
+	fmt.Fprintf(w, "return nil\n")
+	fmt.Fprintf(w, "}\n")
+	fmt.Fprintf(w, "v := %s(*e)\n", goElementType)
+	fmt.Fprintf(w, "return &v\n")
+	fmt.Fprintf(w, "}).(%sPtrOutput)\n", elementType)
+	fmt.Fprint(w, "}\n\n")
+
+}
+
 func (pkg *pkgContext) genPlainType(w io.Writer, name, comment, deprecationMessage string,
 	properties []*schema.Property) {
 
@@ -1243,6 +1260,37 @@ func (pkg *pkgContext) genObjectOutputMethods(w io.Writer, t *schema.ObjectType,
 		fmt.Fprintf(w, "func (o %sOutput) %s() %s {\n", name, propName, outputType)
 		fmt.Fprintf(w, "\treturn o.ApplyT(func (v %s) %s { return v.%s }).(%s)\n",
 			name, applyType, Title(p.Name), outputType)
+		fmt.Fprintf(w, "}\n\n")
+	}
+}
+
+func (pkg *pkgContext) genObjectPtrOutputMethods(w io.Writer, t *schema.ObjectType, name string) {
+	for _, p := range t.Properties {
+		printCommentWithDeprecationMessage(w, p.Comment, p.DeprecationMessage, false)
+		optionalType := codegen.OptionalType(p)
+		outputType, applyType := pkg.outputType(optionalType), pkg.typeString(optionalType)
+		deref := ""
+		// If the property was required, but the type it needs to return is an explicit pointer type, then we need
+		// to dereference it, unless it is a resource type which should remain a pointerArrayMap.
+		_, isResourceType := p.Type.(*schema.ResourceType)
+		if p.IsRequired() && applyType[0] == '*' && !isResourceType {
+			deref = "&"
+		}
+
+		funcName := Title(p.Name)
+		// Avoid conflicts with Output interface for lifted attributes.
+		switch funcName {
+		case "IsSecret", "ElementType":
+			funcName = funcName + "Prop"
+		}
+
+		fmt.Fprintf(w, "func (o %sOutput) %s() %s {\n", name, funcName, outputType)
+		fmt.Fprintf(w, "\treturn o.ApplyT(func (v *%s) %s {\n", name, applyType)
+		fmt.Fprintf(w, "\t\tif v == nil {\n")
+		fmt.Fprintf(w, "\t\t\treturn nil\n")
+		fmt.Fprintf(w, "\t\t}\n")
+		fmt.Fprintf(w, "\t\treturn %sv.%s\n", deref, Title(p.Name))
+		fmt.Fprintf(w, "\t}).(%s)\n", outputType)
 		fmt.Fprintf(w, "}\n\n")
 	}
 }
