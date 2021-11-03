@@ -929,13 +929,13 @@ func (pkg *pkgContext) genOutputType(w io.Writer, t *outputType) {
 	case *schema.ObjectType:
 		genElementMethods = func() { pkg.genObjectOutputMethods(w, t, name) }
 	case *schema.EnumType:
-		// handled elsewhere
+		genElementMethods = func() { pkg.genEnumOutputMethods(w, t, name) }
 	case *schema.ResourceType:
 		isResourceOutput = true
 		// handled elsewhere
 	}
 
-	details := pkg.detailsForType(t)
+	details := pkg.detailsForType(t.elementType)
 
 	printComment(w, comment, false)
 	fmt.Fprintf(w, "type %sOutput struct { *pulumi.OutputState }\n\n", name)
@@ -1001,13 +1001,29 @@ func (pkg *pkgContext) genPtrOutputMethods(w io.Writer, schemaType *schema.Optio
 	fmt.Fprint(w, "\t\t}\n")
 	fmt.Fprintf(w, "\t\tvar ret %s\n", elemRequiredType)
 	fmt.Fprint(w, "\t\treturn ret\n")
-	fmt.Fprintf(w, "\t}).(%sOutput)\n", baseName)
+	fmt.Fprintf(w, "\t}).(%s)\n", elemOutputType)
 	fmt.Fprint(w, "}\n\n")
 
 	switch t := schemaType.ElementType.(type) {
 	case *schema.ObjectType:
 		pkg.genObjectPtrOutputMethods(w, t, baseName)
 	case *schema.EnumType:
+		pkg.genEnumPtrOutputMethods(w, t, baseName)
+	}
+}
+
+type enumElementTypes struct {
+	argsType   string
+	goType     string
+	asFuncName string
+}
+
+func (pkg *pkgContext) enumElementTypes(enumType *schema.EnumType) enumElementTypes {
+	elementArgsType := pkg.argsTypeImpl(enumType.ElementType)
+	return enumElementTypes{
+		argsType:   elementArgsType,
+		goType:     pkg.typeString(enumType.ElementType),
+		asFuncName: strings.TrimPrefix(elementArgsType, "pulumi."),
 	}
 }
 
@@ -1020,11 +1036,9 @@ func (pkg *pkgContext) genEnum(w io.Writer, enumType *schema.EnumType) error {
 
 	printCommentWithDeprecationMessage(w, enumType.Comment, "", false)
 
-	elementArgsType := pkg.argsTypeImpl(enumType.ElementType)
-	elementGoType := pkg.typeString(enumType.ElementType)
-	asFuncName := strings.TrimPrefix(elementArgsType, "pulumi.")
+	element := pkg.enumElementTypes(enumType)
 
-	fmt.Fprintf(w, "type %s %s\n\n", name, elementGoType)
+	fmt.Fprintf(w, "type %s %s\n\n", name, element.goType)
 
 	fmt.Fprintln(w, "const (")
 	for _, e := range enumType.Elements {
@@ -1054,7 +1068,7 @@ func (pkg *pkgContext) genEnum(w io.Writer, enumType *schema.EnumType) error {
 	details := pkg.detailsForType(enumType)
 
 	inputType := pkg.inputType(enumType)
-	pkg.genEnumInputFuncs(w, name, enumType, elementArgsType, inputType, asFuncName, details.optionalInputType)
+	pkg.genEnumInputMethods(w, name, enumType, element.argsType, inputType, element.asFuncName, details.optionalInputType)
 
 	// Generate input and output types.
 	pkg.genOutputTypes(w, details)
@@ -1063,7 +1077,7 @@ func (pkg *pkgContext) genEnum(w io.Writer, enumType *schema.EnumType) error {
 	return nil
 }
 
-func (pkg *pkgContext) genEnumInputFuncs(w io.Writer, typeName string, enum *schema.EnumType, elementType, inputType, asFuncName string, ptrMethods bool) {
+func (pkg *pkgContext) genEnumInputMethods(w io.Writer, typeName string, enum *schema.EnumType, elementArgsType, inputType, asFuncName string, ptrMethods bool) {
 	fmt.Fprintln(w)
 	fmt.Fprintf(w, "func (%s) ElementType() reflect.Type {\n", typeName)
 	fmt.Fprintf(w, "return reflect.TypeOf((*%s)(nil)).Elem()\n", typeName)
@@ -1103,58 +1117,62 @@ func (pkg *pkgContext) genEnumInputFuncs(w io.Writer, typeName string, enum *sch
 	fmt.Fprintln(w)
 
 	if ptrMethods {
-		fmt.Fprintf(w, "func (e %[1]s) To%[2]sPtrOutput() %[3]sPtrOutput {\n", typeName, asFuncName, elementType)
-		fmt.Fprintf(w, "return %s(e).To%sPtrOutputWithContext(context.Background())\n", elementType, asFuncName)
+		fmt.Fprintf(w, "func (e %[1]s) To%[2]sPtrOutput() %[3]sPtrOutput {\n", typeName, asFuncName, elementArgsType)
+		fmt.Fprintf(w, "return %s(e).To%sPtrOutputWithContext(context.Background())\n", elementArgsType, asFuncName)
 		fmt.Fprintln(w, "}")
 		fmt.Fprintln(w)
 
-		fmt.Fprintf(w, "func (e %[1]s) To%[2]sPtrOutputWithContext(ctx context.Context) %[3]sPtrOutput {\n", typeName, asFuncName, elementType)
-		fmt.Fprintf(w, "return %[1]s(e).To%[2]sOutputWithContext(ctx).To%[2]sPtrOutputWithContext(ctx)\n", elementType, asFuncName)
+		fmt.Fprintf(w, "func (e %[1]s) To%[2]sPtrOutputWithContext(ctx context.Context) %[3]sPtrOutput {\n", typeName, asFuncName, elementArgsType)
+		fmt.Fprintf(w, "return %[1]s(e).To%[2]sOutputWithContext(ctx).To%[2]sPtrOutputWithContext(ctx)\n", elementArgsType, asFuncName)
 		fmt.Fprintln(w, "}")
 		fmt.Fprintln(w)
 	}
 }
 
-func (pkg *pkgContext) genEnumOutputFuncs(w io.Writer, name, elementType, goElementType, asFuncName string, ptrMethods bool) {
-	fmt.Fprintf(w, "func (o %[1]sOutput) To%[2]sOutput() %[3]sOutput {\n", name, asFuncName, elementType)
-	fmt.Fprintf(w, "return o.To%sOutputWithContext(context.Background())\n", asFuncName)
+func (pkg *pkgContext) genEnumOutputMethods(w io.Writer, enum *schema.EnumType, name string) {
+	element := pkg.enumElementTypes(enum)
+
+	fmt.Fprintf(w, "func (o %[1]sOutput) To%[2]sOutput() %[3]sOutput {\n", name, element.asFuncName, element.argsType)
+	fmt.Fprintf(w, "return o.To%sOutputWithContext(context.Background())\n", element.asFuncName)
 	fmt.Fprint(w, "}\n\n")
 
-	fmt.Fprintf(w, "func (o %[1]sOutput) To%[2]sOutputWithContext(ctx context.Context) %[3]sOutput {\n", name, asFuncName, elementType)
-	fmt.Fprintf(w, "return o.ApplyTWithContext(ctx, func(_ context.Context, e %s) %s {\n", name, goElementType)
-	fmt.Fprintf(w, "return %s(e)\n", goElementType)
-	fmt.Fprintf(w, "}).(%sOutput)\n", elementType)
+	fmt.Fprintf(w, "func (o %[1]sOutput) To%[2]sOutputWithContext(ctx context.Context) %[3]sOutput {\n", name, element.asFuncName, element.argsType)
+	fmt.Fprintf(w, "return o.ApplyTWithContext(ctx, func(_ context.Context, e %s) %s {\n", name, element.goType)
+	fmt.Fprintf(w, "return %s(e)\n", element.goType)
+	fmt.Fprintf(w, "}).(%sOutput)\n", element.argsType)
 	fmt.Fprint(w, "}\n\n")
 
-	if ptrMethods {
-		fmt.Fprintf(w, "func (o %[1]sOutput) To%[2]sPtrOutput() %[3]sPtrOutput {\n", name, asFuncName, elementType)
-		fmt.Fprintf(w, "return o.To%sPtrOutputWithContext(context.Background())\n", asFuncName)
+	if pkg.detailsForType(enum).optionalInputType {
+		fmt.Fprintf(w, "func (o %[1]sOutput) To%[2]sPtrOutput() %[3]sPtrOutput {\n", name, element.asFuncName, element.argsType)
+		fmt.Fprintf(w, "return o.To%sPtrOutputWithContext(context.Background())\n", element.asFuncName)
 		fmt.Fprint(w, "}\n\n")
 
-		fmt.Fprintf(w, "func (o %[1]sOutput) To%[2]sPtrOutputWithContext(ctx context.Context) %[3]sPtrOutput {\n", name, asFuncName, elementType)
-		fmt.Fprintf(w, "return o.ApplyTWithContext(ctx, func(_ context.Context, e %s) *%s {\n", name, goElementType)
-		fmt.Fprintf(w, "v := %s(e)\n", goElementType)
+		fmt.Fprintf(w, "func (o %[1]sOutput) To%[2]sPtrOutputWithContext(ctx context.Context) %[3]sPtrOutput {\n", name, element.asFuncName, element.argsType)
+		fmt.Fprintf(w, "return o.ApplyTWithContext(ctx, func(_ context.Context, e %s) *%s {\n", name, element.goType)
+		fmt.Fprintf(w, "v := %s(e)\n", element.goType)
 		fmt.Fprintf(w, "return &v\n")
-		fmt.Fprintf(w, "}).(%sPtrOutput)\n", elementType)
+		fmt.Fprintf(w, "}).(%sPtrOutput)\n", element.argsType)
 		fmt.Fprint(w, "}\n\n")
 	}
 }
 
-func (pkg *pkgContext) genEnumPtrOutputFuncs(w io.Writer, name, elementType, goElementType, asFuncName string) {
-	fmt.Fprintf(w, "func (o %[1]sPtrOutput) To%[2]sPtrOutput() %[3]sPtrOutput {\n", name, asFuncName, elementType)
-	fmt.Fprintf(w, "return o.To%sPtrOutputWithContext(context.Background())\n", asFuncName)
+func (pkg *pkgContext) genEnumPtrOutputMethods(w io.Writer, enum *schema.EnumType, name string) {
+	element := pkg.enumElementTypes(enum)
+	requiredType := pkg.typeString(enum)
+
+	fmt.Fprintf(w, "func (o %[1]sOutput) To%[2]sPtrOutput() %[3]sPtrOutput {\n", name, element.asFuncName, element.argsType)
+	fmt.Fprintf(w, "return o.To%sPtrOutputWithContext(context.Background())\n", element.asFuncName)
 	fmt.Fprint(w, "}\n\n")
 
-	fmt.Fprintf(w, "func (o %[1]sPtrOutput) To%[2]sPtrOutputWithContext(ctx context.Context) %[3]sPtrOutput {\n", name, asFuncName, elementType)
-	fmt.Fprintf(w, "return o.ApplyTWithContext(ctx, func(_ context.Context, e *%s) *%s {\n", name, goElementType)
+	fmt.Fprintf(w, "func (o %[1]sOutput) To%[2]sPtrOutputWithContext(ctx context.Context) %[3]sPtrOutput {\n", name, element.asFuncName, element.argsType)
+	fmt.Fprintf(w, "return o.ApplyTWithContext(ctx, func(_ context.Context, e *%s) *%s {\n", requiredType, element.goType)
 	fmt.Fprintf(w, "if e == nil {\n")
 	fmt.Fprintf(w, "return nil\n")
 	fmt.Fprintf(w, "}\n")
-	fmt.Fprintf(w, "v := %s(*e)\n", goElementType)
+	fmt.Fprintf(w, "v := %s(*e)\n", element.goType)
 	fmt.Fprintf(w, "return &v\n")
-	fmt.Fprintf(w, "}).(%sPtrOutput)\n", elementType)
+	fmt.Fprintf(w, "}).(%sPtrOutput)\n", element.argsType)
 	fmt.Fprint(w, "}\n\n")
-
 }
 
 func (pkg *pkgContext) genPlainType(w io.Writer, name, comment, deprecationMessage string,
