@@ -210,7 +210,7 @@ func (ctx *genContext) noteInputType(t *schema.InputType) {
 func (ctx *genContext) noteOptionalType(t *schema.OptionalType) {
 	// Go generates optional inputs as inputs of optionals.
 	if input, ok := t.ElementType.(*schema.InputType); ok {
-		ctx.noteInputType(&schema.InputType{
+		ctx.noteType(&schema.InputType{
 			ElementType: &schema.OptionalType{
 				ElementType: input.ElementType,
 			},

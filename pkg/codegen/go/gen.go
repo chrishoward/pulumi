@@ -527,15 +527,15 @@ func (pkg *pkgContext) typeString(t schema.Type) string {
 	return pkg.typeStringImpl(t, false)
 }
 
-func (pkg *pkgContext) argsZeroValue(t schema.Type) string {
+func (pkg *pkgContext) inputZeroValue(t schema.Type) string {
 	switch t := codegen.SimplifyInputUnion(t).(type) {
 	case *schema.OptionalType:
-		return fmt.Sprintf("(%s)(nil)", pkg.argsType(t))
+		return pkg.inputZeroValue(t.ElementType)
 	case *schema.InputType:
-		return pkg.argsZeroValue(t.ElementType)
+		return pkg.inputZeroValue(t.ElementType)
 	case *schema.EnumType:
 		// Since enum type is itself an input
-		return fmt.Sprintf("%v(%v)", pkg.tokenToEnum(t.Token), pkg.argsZeroValue(t.ElementType))
+		return fmt.Sprintf("%v(%v)", pkg.tokenToEnum(t.Token), pkg.inputZeroValue(t.ElementType))
 	case *schema.ArrayType:
 		return fmt.Sprintf("%v{}", pkg.argsType(t))
 	case *schema.MapType:
@@ -547,7 +547,7 @@ func (pkg *pkgContext) argsZeroValue(t schema.Type) string {
 	case *schema.TokenType:
 		// Use the underlying type for now.
 		if t.UnderlyingType != nil {
-			return pkg.argsZeroValue(t.UnderlyingType)
+			return pkg.inputZeroValue(t.UnderlyingType)
 		}
 		return fmt.Sprintf("%v{}", pkg.tokenToType(t.Token))
 	case *schema.UnionType:
@@ -555,7 +555,7 @@ func (pkg *pkgContext) argsZeroValue(t schema.Type) string {
 		// type for the input instead
 		for _, e := range t.ElementTypes {
 			if typ, ok := e.(*schema.EnumType); ok {
-				return pkg.argsZeroValue(typ.ElementType)
+				return pkg.inputZeroValue(typ.ElementType)
 			}
 		}
 		return "(pulumi.Any)(nil)"
@@ -915,6 +915,13 @@ func (pkg *pkgContext) genOutputTypes(w io.Writer, details *typeDetails) {
 
 func (pkg *pkgContext) genOutputType(w io.Writer, t *outputType) {
 	name := strings.TrimSuffix(pkg.outputType(t), "Output")
+	if opt, isOptional := t.elementType.(*schema.OptionalType); isOptional && isNilType(opt.ElementType) {
+		// pdg: this is only to avoid breaking changes. in principle we do not need to generate a type for
+		// input(optional(T)) if T is nilable, as the type we generate for input(T) captures the semantics of
+		// input(optional(T)) (i.e. the generated type for input(T) already accepts nil to mean "no value").
+		name += "Ptr"
+	}
+
 	elementName := pkg.typeString(codegen.ResolvedType(t.elementType))
 
 	comment, isResourceOutput := "", false
@@ -1189,6 +1196,13 @@ func (pkg *pkgContext) genPlainType(w io.Writer, name, comment, deprecationMessa
 
 func (pkg *pkgContext) genInputType(w io.Writer, t *schema.InputType) {
 	name := strings.TrimSuffix(pkg.inputType(t), "Input")
+	if opt, isOptional := t.ElementType.(*schema.OptionalType); isOptional && isNilType(opt.ElementType) {
+		// pdg: this is only to avoid breaking changes. in principle we do not need to generate a type for
+		// input(optional(T)) if T is nilable, as the type we generate for input(T) captures the semantics of
+		// input(optional(T)) (i.e. the generated type for input(T) already accepts nil to mean "no value").
+		name += "Ptr"
+	}
+
 	elementName := pkg.typeString(codegen.ResolvedType(t))
 
 	pkg.genInputInterface(w, name)
@@ -1283,6 +1297,7 @@ func (pkg *pkgContext) genObjectOutputMethods(w io.Writer, t *schema.ObjectType,
 }
 
 func (pkg *pkgContext) genObjectPtrOutputMethods(w io.Writer, t *schema.ObjectType, name string) {
+	elementGoName := pkg.typeString(t)
 	for _, p := range t.Properties {
 		printCommentWithDeprecationMessage(w, p.Comment, p.DeprecationMessage, false)
 		optionalType := codegen.OptionalType(p)
@@ -1303,7 +1318,7 @@ func (pkg *pkgContext) genObjectPtrOutputMethods(w io.Writer, t *schema.ObjectTy
 		}
 
 		fmt.Fprintf(w, "func (o %sOutput) %s() %s {\n", name, funcName, outputType)
-		fmt.Fprintf(w, "\treturn o.ApplyT(func (v *%s) %s {\n", name, applyType)
+		fmt.Fprintf(w, "\treturn o.ApplyT(func (v *%s) %s {\n", elementGoName, applyType)
 		fmt.Fprintf(w, "\t\tif v == nil {\n")
 		fmt.Fprintf(w, "\t\t\treturn nil\n")
 		fmt.Fprintf(w, "\t\t}\n")
@@ -2049,7 +2064,7 @@ func (pkg *pkgContext) genTypeRegistrations(w io.Writer, objTypes []*schema.Obje
 		for _, obj := range objTypes {
 			details := pkg.detailsForType(obj)
 			for _, t := range details.inputTypes {
-				inputType, argValue := pkg.inputType(t), pkg.argsZeroValue(t)
+				inputType, argValue := pkg.inputType(t), pkg.inputZeroValue(t)
 				fmt.Fprintf(w, "\tpulumi.RegisterInputType(reflect.TypeOf((*%s)(nil)).Elem(), %s)\n", inputType, argValue)
 			}
 		}
@@ -2073,7 +2088,7 @@ func (pkg *pkgContext) genEnumRegistrations(w io.Writer) {
 		for _, e := range pkg.enums {
 			details := pkg.detailsForType(e)
 			for _, t := range details.inputTypes {
-				inputType, argValue := pkg.inputType(t), pkg.argsZeroValue(t)
+				inputType, argValue := pkg.inputType(t), pkg.inputZeroValue(t)
 				fmt.Fprintf(w, "\tpulumi.RegisterInputType(reflect.TypeOf((*%s)(nil)).Elem(), %s)\n", inputType, argValue)
 			}
 		}
@@ -2095,7 +2110,7 @@ func (pkg *pkgContext) genResourceRegistrations(w io.Writer, r *schema.Resource)
 	// Register input type
 	if !pkg.disableInputTypeRegistrations {
 		for _, t := range details.inputTypes {
-			inputType, argValue := pkg.inputType(t), pkg.argsZeroValue(t)
+			inputType, argValue := pkg.inputType(t), pkg.inputZeroValue(t)
 			fmt.Fprintf(w, "\tpulumi.RegisterInputType(reflect.TypeOf((*%s)(nil)).Elem(), %s)\n", inputType, argValue)
 		}
 	}
@@ -2924,6 +2939,8 @@ func GeneratePackage(tool string, pkg *schema.Package) (map[string][]byte, error
 
 		// Enums
 		if len(pkg.enums) > 0 {
+			sort.Slice(pkg.enums, func(i, j int) bool { return pkg.enums[i].Token < pkg.enums[j].Token })
+
 			imports := map[string]string{}
 			for _, e := range pkg.enums {
 				pkg.getImports(e, imports)
@@ -2943,6 +2960,8 @@ func GeneratePackage(tool string, pkg *schema.Package) (map[string][]byte, error
 
 		// Types
 		if len(pkg.types) > 0 {
+			sort.Slice(pkg.types, func(i, j int) bool { return pkg.types[i].Token < pkg.types[j].Token })
+
 			importsAndAliases := map[string]string{}
 			for _, t := range pkg.types {
 				pkg.getImports(t, importsAndAliases)
